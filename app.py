@@ -1,9 +1,19 @@
 import streamlit as st
 import re
-import google.generativeai as palm
-from sec_api import ExtractorApi  # Import SEC Extractor API
-import matplotlib.pyplot as plt
-import config
+from sec_api import ExtractorApi
+import google.generativeai as genai
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+SEC_API_KEY = os.getenv("SEC_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+
+# Configure the Google Gemini client
+genai.configure(api_key=GOOGLE_API_KEY)
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 # Function to clean text
 def clean_text(text):
@@ -18,65 +28,70 @@ def split_text(text, chunk_size):
     return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
 
 # Function to summarize text chunks
-def summarize_text_chunks(text_chunks, model):
+def summarize_text_chunks(text_chunks):
     summaries = []
     for i, chunk in enumerate(text_chunks):
-        prompt = "I collected some SEC filing data and want to summarize it. " \
-                 "Please summarize and output 10 BULLET POINTS ONLY. Do not use the words 'bullet points' " \
-                 "in your answer. Make sure the output is WELL FORMATTED and EASY TO UNDERSTAND. Otherwise, a child will die. The relevant information is below:\n" + chunk
-        print("Generating summary for Chunk", i + 1)
-        completion = palm.generate_text(
-            model=model,
-            prompt=prompt,
-            temperature=0,
-            max_output_tokens=300,
+        prompt = (
+            f"I collected some SEC filing data and want to summarize it. "
+            f"Please summarize and output 10 bullet points only. "
+            f"Do not say 'bullet points' in your answer. Make sure it's well formatted and easy to understand. "
+            f"The relevant information is below:\n\n{chunk}"
         )
-        summary = completion.result
-        summaries.append(summary)  # Append the summary to the list of summaries
+        print(f"Generating summary for Chunk {i + 1}")
+        try:
+            response = model.generate_content(prompt)
+            summaries.append(response.text.strip())
+        except Exception as e:
+            summaries.append(f"[Error generating summary: {e}]")
     return summaries
 
-
 # Initialize SEC Extractor API
-extractorApi = ExtractorApi("YOUR_API_KEY")
-palm.configure(api_key=config.API_KEY)
+extractorApi = ExtractorApi(SEC_API_KEY)
+
 # Streamlit UI
 st.title("SEC Filing Summarization App")
 
 # User input for filing URL
 filing_url = st.text_input("Enter the SEC filing URL:")
 
-# Dropdown to select section
-sections = ['1', '1A', '1B', '6', '7', '7A', '8', '9']
-sections_dict = {"1": "Business", "1A": "Risk Factors", "1B" : "Unresolved Staff Comments", "6": "Selected Financial Data", "7": "Management Discussion and Analysis of Financial Condition and Results of Operation", "7A": "Quantitative and Qualitative Disclosures about Market Risk", "8": "Financial Statements and Supplementary Data", "9": "Changes in and Disagreements with Accountants on Accounting and Financial Disclosure"}
-selected = st.selectbox("Select the section of the SEC filing to summarize:", sections_dict.items())
-selected_pair = selected[0]  # Accessing the first key-value pair
-selected_section = selected_pair[0] 
+# Section selection
+sections_dict = {
+    "1": "Business",
+    "1A": "Risk Factors",
+    "1B": "Unresolved Staff Comments",
+    "6": "Selected Financial Data",
+    "7": "Management's Discussion and Analysis",
+    "7A": "Market Risk Disclosures",
+    "8": "Financial Statements",
+    "9": "Accounting Disagreements"
+}
+
+# Create a list of "Section X: Name" labels for display
+section_labels = [f"Section {k}: {v}" for k, v in sections_dict.items()]
+section_keys = list(sections_dict.keys())
+
+# Display the dropdown and get the index of the selected item
+selected_index = st.selectbox("Select SEC filing section:", range(len(section_labels)), format_func=lambda i: section_labels[i])
+
+# Retrieve actual section key and label
+selected_key = section_keys[selected_index]
+selected_label = sections_dict[selected_key]
+
 if st.button("Summarize"):
     if filing_url:
-        # Extract text from SEC filing using the Extractor API
-        section_text = extractorApi.get_section(filing_url, selected_section, 'text')
+        try:
+            section_text = extractorApi.get_section(filing_url, selected_key, 'text')
+            cleaned_text = clean_text(section_text)
+            chunk_size = 40000
+            text_chunks = split_text(cleaned_text, chunk_size)
 
-        # Clean the extracted text
-        cleaned_text = clean_text(section_text)
+            summaries = summarize_text_chunks(text_chunks)
 
-        # Split the text into smaller chunks
-        chunk_size = 40000  # Adjust as needed
-        text_chunks = split_text(cleaned_text, chunk_size)
-
-        # Load the model
-        model = "models/text-bison-001"
-
-        # Summarize each chunk of text
-        summaries = summarize_text_chunks(text_chunks, model)
-
-        # Combine summaries into a single text
-        # Flatten the list of lists
-        combined_summary = " ".join(str(point) for sublist in summaries for point in sublist if point is not None)
-
-      
-        # Display the summaries
-        st.subheader("Summary")
-        for i, summary in enumerate(summaries):
-            st.write(summary)
+            st.subheader(f"Summary of Section {selected_key} - {selected_label}")
+            for i, summary in enumerate(summaries, 1):
+                st.markdown(f"**Chunk {i}:**")
+                st.write(summary)
+        except Exception as e:
+            st.error(f"Error occurred while processing: {e}")
     else:
-        st.warning("Please enter the SEC filing URL.")
+        st.warning("Please enter a valid SEC filing URL.")
